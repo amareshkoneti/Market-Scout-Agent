@@ -6,7 +6,7 @@
  */
 const API_BASE = (
     import.meta.env.VITE_API_URL?.replace(/\/$/, '') ||
-    (import.meta.env.DEV ? 'http://localhost:8000' : 'https://api.market-scout.me')
+    (import.meta.env.DEV ? 'http://44.195.79.94:8000' : 'https://api.market-scout.me')
 );
 
 async function apiFetch(path, options = {}) {

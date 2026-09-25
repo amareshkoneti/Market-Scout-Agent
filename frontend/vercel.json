@@ -2,11 +2,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://api.market-scout.me/:path*"
-    },
-    {
-      "source": "/(.*)",
-      "destination": "/index.html"
+      "destination": "http://3.234.0.126:8000/:path*"
     }
   ]
 }
