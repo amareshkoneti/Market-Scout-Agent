@@ -221,6 +221,12 @@ async def invoke_llm(
                     max_tokens=max_tokens,
 
                     top_p=settings.LLM_TOP_P,
+
+                    extra_body={
+                        "chat_template_kwargs": {
+                            "enable_thinking": settings.LLM_ENABLE_THINKING,
+                        }
+                    },
                 )
 
             duration = time.time() - start_time

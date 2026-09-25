@@ -8,6 +8,45 @@ from llm.nvidia_client import invoke_llm
 logger = logging.getLogger(__name__)
 
 
+def _parse_query_response(raw_response: str, attempted: List[str]) -> List[str]:
+    """Extract usable queries when the model adds prose around its answer."""
+    import re
+
+    text = (raw_response or "").strip()
+    candidates = []
+
+    # Prefer a complete JSON object, even when it is preceded by reasoning or
+    # wrapped in a markdown fence.
+    json_candidates = re.findall(r"\{.*?\}", text, flags=re.DOTALL)
+    for candidate in json_candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("queries"), list):
+            candidates.extend(parsed["queries"])
+            break
+
+    # Nemotron can emit its answer as quoted bullet points after a reasoning
+    # trace. This keeps a malformed response useful without accepting prose.
+    if not candidates:
+        candidates = re.findall(
+            r"(?:^|\n)\s*(?:[-*]\s*|\d+[.)]\s*)[\"']([^\"']+)[\"']",
+            text,
+        )
+
+    clean_queries = []
+    attempted_normalized = {query.strip().casefold() for query in attempted}
+    for query in candidates:
+        if not isinstance(query, str):
+            continue
+        query = query.strip()
+        if query and query.casefold() not in attempted_normalized and query not in clean_queries:
+            clean_queries.append(query)
+
+    return clean_queries
+
+
 async def plan_queries(
     company: str,
     feedback: Optional[str] = None,
@@ -29,40 +68,19 @@ async def plan_queries(
     current_month_year = datetime.now().strftime("%B %Y")   # e.g. "April 2026"
 
     prompt = f"""
-You are an autonomous technical search planning agent.
+Generate exactly 4 search queries for {company}.
+Find technical updates released in the last 7 days: APIs, SDKs, models,
+platform changes, or infrastructure.
 
-Company:
-{company}
+Constraints:
+- Plain-language search terms only; no search operators.
+- Mention {current_month_year}, this week, or past week in each query.
+- Every query must use a different technical angle.
+- Do not repeat any attempted query: {attempted}
 
-Previously attempted queries (DO NOT repeat):
-{attempted}
-
-Current date: {current_month_year}
-
-Goal:
-Generate 4 NEW plain-language search queries that will find RECENT technical updates
-(APIs, SDKs, models, platform changes, infrastructure) released in the LAST 7 DAYS for the company above.
-
-CRITICAL RULES — READ CAREFULLY:
-- Write plain natural-language queries, exactly as a person would type them in a search box
-- Do NOT use Google search operators: no site:, no inurl:, no intitle:, no filetype:, no date:, no intext:
-- Do NOT include date range syntax like "2024-04-09..2024-04-16"
-- DO naturally mention "{current_month_year}" or "past week" or "this week" OR "latest 2026" to anchor results to now
-- Each query must be distinct and cover a different angle (API, model, SDK, platform, etc.)
-- Do NOT repeat previously attempted queries
-
-GOOD query examples (follow this style):
-- "{company} new API update {current_month_year}"
-- "{company} model release past week"
-- "{company} SDK changelog {current_month_year}"
-- "{company} platform announcement this week"
-
-Rules:
-- Return exactly 4 queries
-- Return ONLY valid JSON with no markdown fences and no extra text
-
-Output format:
-{{ "queries": ["...", "...", "...", "..."] }}
+Return only this JSON object. Do not explain your reasoning, preface the
+object, use markdown, or output any other characters:
+{{"queries":["query 1","query 2","query 3","query 4"]}}
 """
 
     if feedback:
@@ -70,46 +88,40 @@ Output format:
 
     # 1️⃣ LLM call (always returns STRING)
     raw_response = await invoke_llm(
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a search planner and JSON-only API. Never reveal reasoning. "
+                    "Return the requested object as the first and only output."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
         temperature=0.3,
-        max_tokens=400,
+        max_tokens=300,
     )
 
     logger.debug("SEARCH PLANNER — Raw LLM output:\n%s", raw_response)
 
-    # 2️⃣ Strip markdown fences if LLM wrapped in ```json ... ```
-    cleaned_response = raw_response.strip()
-    if cleaned_response.startswith("```"):
-        import re
-        cleaned_response = re.sub(r"```[a-z]*\s?|\s?```", "", cleaned_response).strip()
+    clean_queries = _parse_query_response(raw_response, attempted)
 
-    # 3️⃣ Parse JSON
-    try:
-        parsed = json.loads(cleaned_response)
-    except json.JSONDecodeError as exc:
-        logger.error("SEARCH PLANNER — Invalid JSON:\n%s", raw_response)
-        raise RuntimeError("Search planner returned invalid JSON") from exc
-
-    # 4️⃣ Validate schema
-    queries = parsed.get("queries")
-
-    if not isinstance(queries, list):
-        raise RuntimeError("Search planner output missing 'queries' list")
-
-    # Allow 3-5 queries (strict ==4 was too fragile)
-    if len(queries) < 1:
-        raise RuntimeError(f"Search planner returned empty query list")
-
-    # 5️⃣ Normalize + dedupe against memory
-    clean_queries = []
-    for q in queries:
-        if isinstance(q, str):
-            q = q.strip()
-            if q and q not in attempted:
-                clean_queries.append(q)
+    fallback_queries = [
+        f"{company} API release notes {current_month_year}",
+        f"{company} AI model launch past week",
+        f"{company} developer SDK updates {current_month_year}",
+        f"{company} cloud platform infrastructure news this week",
+    ]
+    attempted_normalized = {query.strip().casefold() for query in attempted}
+    for query in fallback_queries:
+        if len(clean_queries) >= 4:
+            break
+        if query.casefold() not in attempted_normalized and query not in clean_queries:
+            clean_queries.append(query)
 
     if not clean_queries:
-        raise RuntimeError("Search planner produced no usable queries (all were repeats)")
+        logger.error("SEARCH PLANNER — No usable queries in response:\n%s", raw_response)
+        raise RuntimeError("Search planner returned no usable queries")
 
     logger.info(
         "SEARCH PLANNER — Generated %d queries for %s",

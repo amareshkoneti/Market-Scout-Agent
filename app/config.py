@@ -22,7 +22,8 @@ class Settings(BaseSettings):
     # NVIDIA_API_KEY: str = os.getenv("NVIDIA_API_KEY", "")
     NVIDIA_API_KEYS: str = os.getenv("NVIDIA_API_KEYS", "")
 
-    LLM_MODEL: str = "meta/llama-3.1-8b-instruct"
+    LLM_MODEL: str = "nvidia/nemotron-3-super-120b-a12b"
+    LLM_ENABLE_THINKING: bool = False
     LLM_MAX_TOKENS: int = 4096
     LLM_TEMPERATURE: float = 0.2
     LLM_TOP_P: float = 0.7  
